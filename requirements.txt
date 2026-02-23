@@ -1,0 +1,8 @@
+pandas 
+sqlalchemy
+dotenv 
+langchain_community
+langchain_openai
+langchain
+langchain_core
+ddgs
