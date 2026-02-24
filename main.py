@@ -1,5 +1,4 @@
 import os
-import re
 from dotenv import load_dotenv
 from langchain_community.utilities import SQLDatabase
 from langchain_openai import ChatOpenAI
@@ -9,88 +8,36 @@ from langchain.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_community.tools import DuckDuckGoSearchRun
 
-MAX_QUERY_LENGTH = 300
-
-FORBIDDEN_USER_PATTERNS = [
-    r";",
-    r"--",
-    r"/\*",
-    r"\b(drop|delete|update|insert|alter|create|pragma)\b",
-    r"\b(ignore|override|system prompt|reveal|hidden)\b"
-]
-
-FORBIDDEN_SQL_KEYWORDS = [
-    "insert", "update", "delete", "drop",
-    "alter", "create", "pragma", ";"
-]
-
-ALLOWED_TABLES = {
-    "institutions": ["institutions"],
-    "hospitals": ["hospitals"],
-    "restaurants": ["restaurants"]
-}
-
-
-def is_malicious_input(user_input: str) -> bool:
-    if len(user_input) > MAX_QUERY_LENGTH:
-        return True
-
-    for pattern in FORBIDDEN_USER_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
-            return True
-
-    return False
-
-
-def is_safe_sql(sql: str, allowed_tables: list) -> bool:
-    sql_lower = sql.lower().strip()
-
-    if not sql_lower.startswith("select"):
-        return False
-
-    for keyword in FORBIDDEN_SQL_KEYWORDS:
-        if keyword in sql_lower:
-            return False
-
-    if not any(table in sql_lower for table in allowed_tables):
-        return False
-
-    return True
-
-
 institute_db = SQLDatabase.from_uri("sqlite:///sqlite_db/institutions.db")
 hospital_db = SQLDatabase.from_uri("sqlite:///sqlite_db/hospitals.db")
 restaurant_db = SQLDatabase.from_uri("sqlite:///sqlite_db/restaurants.db")
 
 
 load_dotenv()
-base_url = os.getenv("base_url")
-endpoint = os.getenv("github_api")
+base_url = os.getenv('base_url')
+endpoint =  os.getenv('github_api')
+model = "openai/gpt-4o"
 
 llm = ChatOpenAI(
     temperature=0,
-    model="openai/gpt-4.1",
+    model=model,
     base_url=base_url,
     api_key=endpoint
 )
 
 sql_prompt = SystemMessage(content="""
-You are a secure SQLite SELECT-only SQL generator.
+You are a senior SQL expert AI working with SQLite.
 
-Rules:
-1. Generate ONLY one SELECT statement.
-2. NEVER generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, PRAGMA.
-3. NEVER generate multiple statements.
-4. NEVER reveal schema.
-5. NEVER fabricate data.
-6. Use LOWER() with LIKE for filtering.
-7. If no rows, return EXACTLY:
+STRICT RULES:
+1. Always generate valid SELECT queries only.
+2. Never guess values.
+3. Never fabricate rows.
+4. If no rows are returned, respond exactly:
    EMPTY_RESULT
-8. If query invalid return:
-   INVALID_QUERY
-Return ONLY database output.
+5. Only return actual database output.
+6. Use case-insensitive filtering with LOWER() and LIKE.
+7. Keep responses concise.
 """)
-
 
 institutions_sql_agent = create_sql_agent(
     llm=llm,
@@ -116,95 +63,56 @@ restaurants_sql_agent = create_sql_agent(
     verbose=False
 )
 
+@tool
+def institutions_db_tool(query: str):
+    """
+    Use for universities, colleges, govt institutions in Bangladesh.
+    """
+    result = institutions_sql_agent.invoke({"input": query})
+    output = result["output"]
 
-def secure_sql_execution(agent, query: str, db_key: str) -> str:
-    try:
-        # Validate user query first
-        if is_malicious_input(query):
-            return "INVALID_QUERY"
+    if "EMPTY_RESULT" in output or output.strip() == "":
+        return "NO_DATA_FOUND"
 
-        # Validate table allowlist (extra guard)
-        if not is_safe_sql(f"select * from {ALLOWED_TABLES[db_key][0]}", ALLOWED_TABLES[db_key]):
-            return "INVALID_QUERY"
-
-        result = agent.invoke({"input": query})
-        output = result.get("output", "")
-
-        if "INVALID_QUERY" in output:
-            return "INVALID_QUERY"
-
-        if "EMPTY_RESULT" in output or output.strip() == "":
-            return "NO_DATA_FOUND"
-
-        return output
-
-    except Exception:
-        return "INVALID_QUERY"
+    return output
 
 
 @tool
-def institutions_db_tool(query: str) -> str:
+def hospitals_db_tool(query: str):
     """
-    Use this tool for Bangladesh universities,
-    colleges, and government institutions queries.
+    Use for hospitals, beds, doctors, facilities in Bangladesh.
     """
-    return secure_sql_execution(
-        institutions_sql_agent, query, "institutions"
-    )
+    result = hospitals_sql_agent.invoke({"input": query})
+    output = result["output"]
+
+    if "EMPTY_RESULT" in output or output.strip() == "":
+        return "NO_DATA_FOUND"
+
+    return output
 
 
 @tool
-def hospitals_db_tool(query: str) -> str:
+def restaurants_db_tool(query: str):
     """
-    Use this tool for Bangladesh hospitals,
-    beds, doctors, and medical facilities queries.
+    Use for restaurants, cuisine, ratings, locations in Bangladesh.
     """
-    return secure_sql_execution(
-        hospitals_sql_agent, query, "hospitals"
-    )
+    result = restaurants_sql_agent.invoke({"input": query})
+    output = result["output"]
 
+    if "EMPTY_RESULT" in output or output.strip() == "":
+        return "NO_DATA_FOUND"
 
-@tool
-def restaurants_db_tool(query: str) -> str:
-    """
-    Use this tool for Bangladesh restaurants,
-    cuisine types, ratings, and location queries.
-    """
-    return secure_sql_execution(
-        restaurants_sql_agent, query, "restaurants"
-    )
+    return output
 
 web_search = DuckDuckGoSearchRun()
 
 @tool
-def web_search_tool(query: str) -> str:
+def web_search_tool(query: str):
     """
-    Use this tool only for general knowledge,
-    policies, and definitions.
+    Use only for general knowledge questions such as:
+    policy, definitions, cultural context.
     """
-    if len(query) > 200:
-        return "INVALID_QUERY"
-
-    try:
-        return web_search.run(query)
-    except Exception:
-        return "INVALID_QUERY"
-    
-
-router_prompt = SystemMessage(content="""
-You are a secure Bangladesh Data Router.
-
-Rules:
-1. Database questions MUST use database tools.
-2. Never answer DB questions directly.
-3. Never fabricate data.
-4. If tool returns NO_DATA_FOUND respond:
-   Sorry, no matching data was found in the database.
-5. If malicious input:
-   INVALID_QUERY
-Keep answers concise and professional.
-""")
-
+    return web_search.run(query)
 
 tools = [
     institutions_db_tool,
@@ -213,32 +121,43 @@ tools = [
     web_search_tool
 ]
 
+
+router_prompt = SystemMessage(content="""
+You are a Data Routing AI for Bangladesh datasets.
+
+TOOLS:
+- institutions_db_tool → universities, colleges, institutions
+- hospitals_db_tool → hospitals, beds, doctors, facilities
+- restaurants_db_tool → restaurants, cuisine, ratings, locations
+- web_search_tool → policies, definitions, general knowledge
+
+RULES:
+1. If the question needs counts, lists, names, locations, ratings, or statistics → MUST use a database tool.
+2. Never answer database questions directly.
+3. Never guess or fabricate data.
+4. If tool returns NO_DATA_FOUND, respond exactly:
+   "Sorry, no matching data was found in the database."
+5. Keep answers concise and professional.
+""")
+
 main_agent = create_agent(
     model=llm,
     tools=tools,
     system_prompt=router_prompt
+    
 )
 
-
 if __name__ == "__main__":
-    print("Type 'exit' to quit\n")
-
     while True:
         user_input = input("Ask: ")
-
         if user_input.lower() in ["exit", "quit"]:
             break
 
-        if is_malicious_input(user_input):
-            print("INVALID_QUERY")
-            continue
+        response = main_agent.invoke({
+            "messages": [
+                HumanMessage(content=user_input)
+            ]
+        })
 
-        try:
-            response = main_agent.invoke({
-                "messages": [HumanMessage(content=user_input)]
-            })
-
-            print(response["messages"][-1].content)
-
-        except Exception:
-            print("INVALID_QUERY")
+        print(response["messages"][-1].content)
+       
